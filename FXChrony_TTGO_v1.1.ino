@@ -1,0 +1,736 @@
+#include "BLEDevice.h"
+#include "OneButton.h"
+#include <EEPROM.h>
+#include <esp_sleep.h>
+#include "esp_adc_cal.h"
+#include <TFT_eSPI.h>
+
+TFT_eSPI tft = TFT_eSPI(135, 240); // Invoke custom library
+
+#define EEPROM_SIZE 5
+
+static esp_adc_cal_characteristics_t adc_chars;
+
+#define PIN_INPUT 0
+
+#define PIN_LED 25
+
+OneButton button(PIN_INPUT, true);
+
+#define UNITS_IMPERIAL  0
+#define UNITS_METRIC    1
+#define UNITS_MAX       1
+
+#define PROFILE_BOW_AIRSOFT 0
+#define PROFILE_CO2_PISTOL  1
+#define PROFILE_AIR_PISTOL  2
+#define PROFILE_AIR_GUN_UK  3
+#define PROFILE_AIR_GUN_FAC 4
+#define PROFILE_MAX         4
+
+#define DISPLAY_FLIP_OFF    0
+#define DISPLAY_FLIP_ON     1
+#define DISPLAY_FLIP_MAX    1
+
+#define SENSITIVITY_MAX     100
+
+#define STATE_IDLE          0
+#define STATE_CONNECTING    1
+#define STATE_CONNECTED     2
+
+#define seconds() (millis()/1000)
+
+static uint8_t state = STATE_IDLE;
+
+static float chronyVBattery;
+static unsigned long chronyVBattLastRead = 0;
+
+// The remote service we wish to connect to.
+static BLEUUID deviceUUID("0000180a-0000-1000-8000-00805f9b34fb");
+
+static BLEUUID serviceUUID("00001623-88EC-688C-644B-3FA706C0BB75");
+
+// The characteristic of the remote service we are interested in.
+static const char * charUUIDs[] = {
+  "00001624-88EC-688C-644B-3FA706C0BB75",
+  "00001625-88EC-688C-644B-3FA706C0BB75",
+  "00001626-88EC-688C-644B-3FA706C0BB75",
+  "00001627-88EC-688C-644B-3FA706C0BB75",
+  "00001628-88EC-688C-644B-3FA706C0BB75",
+  "00001629-88EC-688C-644B-3FA706C0BB75",
+  "0000162A-88EC-688C-644B-3FA706C0BB75"
+};
+
+static BLERemoteCharacteristic* pRemoteCharacteristic;
+static BLEAdvertisedDevice* myDevice;
+static BLEClient*  pClient;
+static BLERemoteService* pRemoteService;
+
+static bool renderMenu = false;
+static bool dirty = false;
+static bool profile_changed = false;
+static bool power_saving = false;
+static unsigned long display_on_at = 0;
+static uint8_t searching_ctr = 0;
+
+static uint8_t sensitivity = 50;
+static uint8_t units = UNITS_IMPERIAL;
+static uint8_t profile = PROFILE_AIR_GUN_FAC;
+static uint8_t display_flip = 0;
+static uint8_t power_save_duration = 0;
+
+static uint32_t shot_count = 0;
+
+static uint8_t nc_counter = 0;
+
+typedef  void (* menuItemCallback_t)(uint8_t);
+typedef  void (* menuItemGenString_t)(char *);
+
+typedef struct menuItem {
+    const char * menuString;
+    menuItemGenString_t menuItemGenString;
+    struct menuItem * nextMenuItem;
+    struct menuItem * currentSubMenu;
+    struct menuItem * subMenu;
+    menuItemCallback_t menuItemCallback;
+    uint8_t param;
+    menuItemGenString_t menuItemGenCurSelString;
+} menuItem_t;
+
+static menuItem_t * menuStack[4];
+static int menuStackIndex;
+static menuItem_t * pCurrentMenuItem;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting Open Display...");
+
+  button.attachDoubleClick(doubleClick);
+  button.attachLongPressStop(longPressStop);
+  button.attachClick(singleClick);
+  
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
+
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC1_CHANNEL_1, ADC_ATTEN_DB_11);
+  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &adc_chars);
+  pinMode(14, OUTPUT);
+  digitalWrite(14, HIGH);
+
+/*
+ * Read the Settings, if any setting is out of range
+ * give it a sensible default value (cope with first use)
+ */
+  EEPROM.begin(EEPROM_SIZE);
+  sensitivity = EEPROM.read(0);
+  if(sensitivity > SENSITIVITY_MAX) {
+    sensitivity = 30;
+    EEPROM.write(0, sensitivity);    
+  }
+  units = EEPROM.read(1);
+  if(units > UNITS_MAX) {
+    units = UNITS_MAX;
+    EEPROM.write(1, units);
+  }
+  profile = EEPROM.read(2);
+  if(profile > PROFILE_MAX) {
+    profile = PROFILE_MAX;
+    EEPROM.write(2, profile);
+  }
+  display_flip = EEPROM.read(3);
+  if(display_flip > DISPLAY_FLIP_MAX) {
+    display_flip = 0;
+    EEPROM.write(3, display_flip);
+  }
+  power_save_duration = EEPROM.read(4);
+  if(power_save_duration > 10) {
+    power_save_duration = 10;
+    EEPROM.write(4, power_save_duration);
+  }
+  EEPROM.commit();
+ 
+  BLEDevice::init("");
+  tft.init();
+  tft.setRotation(display_flip ? 1 : 3);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  dirty = true;
+}
+
+void doRenderMenu() {
+    char genHeader[16];
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextSize(3);
+
+    const char * pHeadertxt;
+    if(pCurrentMenuItem->menuItemGenString == NULL) {
+      pHeadertxt = pCurrentMenuItem->menuString;
+    } else {
+        pHeadertxt = genHeader;
+        pCurrentMenuItem->menuItemGenString(genHeader);
+    }
+
+    int16_t hdr_w = tft.textWidth(pHeadertxt);
+    tft.drawString(pHeadertxt, (tft.width()-hdr_w)/2, 25);
+
+    tft.setTextSize(3);
+
+    const char * psubHeadertxt = pCurrentMenuItem->currentSubMenu->menuString;
+    if(psubHeadertxt == NULL) {
+        psubHeadertxt = genHeader;
+        pCurrentMenuItem->currentSubMenu->menuItemGenString(genHeader);
+    }
+
+    hdr_w = tft.textWidth(psubHeadertxt);
+    tft.drawString(psubHeadertxt, (tft.width()-hdr_w)/2, 60);
+
+    tft.setTextSize(2);
+
+    const char * pcurSelHeadertxt;
+    if(pCurrentMenuItem->currentSubMenu->menuItemGenCurSelString) {
+        pcurSelHeadertxt = genHeader;
+        pCurrentMenuItem->currentSubMenu->menuItemGenCurSelString(genHeader);
+
+        hdr_w = tft.textWidth(pcurSelHeadertxt);
+        tft.drawString(pcurSelHeadertxt, (tft.width()-hdr_w)/2, 100);
+      }
+}
+
+void renderDeviceVBatt() {
+    char temp_str[16];
+    tft.setTextSize(1);
+    uint32_t vbat = esp_adc_cal_raw_to_voltage(analogRead(34), &adc_chars);
+    sprintf (temp_str, "D %.1fV", ((float)vbat / 4095.0) * 2.0 * 3.3 * (1100 / 1000.0));
+    tft.drawString(temp_str, 0, 10);
+}
+
+#define STR_SEARCHING "Searching"
+
+void renderSearching() {
+  char temp_str[16];
+  int16_t w;
+  tft.fillScreen(TFT_BLACK);
+
+  strcpy(temp_str,STR_SEARCHING);
+  for(uint8_t i = 0; i < searching_ctr; i++) {
+    strcat(temp_str,".");
+  }      
+  tft.setTextSize(3);
+  w = tft.textWidth(temp_str);
+  tft.drawString(temp_str, (tft.width()-w)/2, 60);      
+  renderDeviceVBatt();
+  searching_ctr++;
+  searching_ctr %= 4;
+}
+
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+ /**
+   * Called for each advertising BLE server.
+   */
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    Serial.println(advertisedDevice.toString().c_str());
+    // We have found a device, let us now see if it contains the service we are looking for.
+    if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(deviceUUID)) {
+      Serial.print("Found Chrony");
+      BLEDevice::getScan()->stop();
+      myDevice = new BLEAdvertisedDevice(advertisedDevice);
+      state = STATE_CONNECTING;
+    } // Found our server
+  } // onResult
+}; // MyAdvertisedDeviceCallbacks
+
+void do_scan() {
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setInterval(1349);
+  pBLEScan->setWindow(449);
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(5, false);
+}
+
+bool writeChar(BLERemoteService* pRemoteService, int idx, uint8_t value)
+{
+  // Obtain a reference to the characteristic in the service of the remote BLE server.
+  pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUIDs[idx]);
+  if (pRemoteCharacteristic == nullptr) {
+    Serial.print("Failed to find our characteristic UUID: ");
+    Serial.println(charUUIDs[idx]);
+    return false;
+  }
+
+  // Read the value of the characteristic.
+  if(pRemoteCharacteristic->canWrite()) {
+    pRemoteCharacteristic->writeValue(&value, 1);
+  }
+  Serial.printf(" - Wrote to characteristic %s value %X OK", charUUIDs[idx], value);
+
+  return true;
+}
+
+bool readChar(BLERemoteService* pRemoteService, int idx, uint8_t * value)
+{
+  // Obtain a reference to the characteristic in the service of the remote BLE server.
+  pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUIDs[idx]);
+  if (pRemoteCharacteristic == nullptr) {
+    Serial.print("Failed to find our characteristic UUID: ");
+    Serial.println(charUUIDs[idx]);
+    return false;
+  }
+
+  // Read the value of the characteristic.
+  if(pRemoteCharacteristic->canRead()) {
+    std::string v = pRemoteCharacteristic->readValue();
+    *value = v[0];
+  }
+  Serial.println(" - Read from characteristic OK");
+  return true;
+}
+
+void renderChronyVBatt(){
+  uint8_t vb;
+  char temp_str[16];
+  sprintf (temp_str, "C %.1fV", chronyVBattery);
+  int16_t w = tft.textWidth(temp_str);
+  tft.drawString(temp_str, tft.width() - w, 6);
+}
+
+
+bool readBattery(){
+  uint8_t vb;
+  if(!readChar(pRemoteService, 3, &vb)) {
+    return false;
+  }
+  chronyVBattery = (vb * 20.0)/1000;
+  return true;  
+}
+
+
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pclient) {
+  }
+
+  void onDisconnect(BLEClient* pclient) {
+    state = STATE_IDLE;
+    dirty = true;
+    renderMenu = false;
+    Serial.println("onDisconnect");
+  }
+};
+
+
+static void notifyCallback(
+  BLERemoteCharacteristic* pBLERemoteCharacteristic,
+  uint8_t* pData,
+  size_t length,
+  bool isNotify) {
+  char sbuffer[16];
+
+  //Serial.print("Notify callback for characteristic ");
+  // Third byte is return in steps of 5%, anything better than 10% we display  
+  uint8_t r = ((char*)pData)[2] * 5;
+  uint16_t speed;    
+  if((r >= sensitivity) && !renderMenu) {
+    display_on_at = seconds();
+    power_saving = false;
+
+    renderMenu = false;
+    shot_count++;    
+    Serial.print(pBLERemoteCharacteristic->getUUID().toString().c_str());
+    Serial.print(" of data length ");
+    Serial.println(length);
+    Serial.print("data: ");
+    Serial.printf("%02X %02X %02X\n",((char*)pData)[0],((char*)pData)[1],((char*)pData)[2]);
+
+    speed = ((char*)pData)[0];
+    speed <<= 8;
+    speed |= ((char*)pData)[1];
+
+    float fspeed = speed;
+
+    if(units == UNITS_IMPERIAL) {
+      fspeed *= 0.0475111859;
+      sprintf (sbuffer, "%d FPS", int(fspeed));
+    } else {
+      fspeed *= 0.014481409;
+      sprintf (sbuffer, "%d M/S", int(fspeed));
+    }
+    tft.fillScreen(TFT_BLACK);
+
+    tft.setTextSize(4);
+    int16_t w = tft.textWidth(sbuffer);
+    tft.drawString(sbuffer, (tft.width()-w)/2, 35);      
+
+    tft.setTextSize(2);
+    sprintf (sbuffer, "Shot# %d", shot_count);
+    w = tft.textWidth(sbuffer);
+    tft.drawString(sbuffer, (tft.width()-w)/2, 80);
+
+    sprintf (sbuffer, "Return %d%%", r);
+    w = tft.textWidth(sbuffer);
+    tft.drawString(sbuffer, (tft.width()-w)/2, 105);
+    renderDeviceVBatt();
+    renderChronyVBatt();
+//    u8g2.sendBuffer();
+  }
+  nc_counter++;
+  nc_counter %= 5;
+  digitalWrite(PIN_LED, nc_counter == 0 ? HIGH : LOW);
+}
+
+uint8_t profile_bytes[2][5] = {{0x32, 0x32, 0x32, 0x32, 0x64},{0x17, 0x1E, 0x2D, 0x43, 0x5A}};
+
+//151-462
+
+void connectToChrony() {
+  Serial.print("Forming a connection to ");
+  Serial.println(myDevice->getAddress().toString().c_str());
+  
+  pClient  = BLEDevice::createClient();
+  Serial.println(" - Created client");
+
+  pClient->setClientCallbacks(new MyClientCallback());
+
+  // Connect to the remove BLE Server.
+  pClient->connect(myDevice);  // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
+  Serial.println(" - Connected to server");
+
+  // Obtain a reference to the service we are after in the remote BLE server.
+  pRemoteService = pClient->getService(serviceUUID);
+  if (pRemoteService == nullptr) {
+    Serial.print("Failed to find our service UUID: ");
+    Serial.println(serviceUUID.toString().c_str());
+    pClient->disconnect();
+    dirty = true;
+    state = STATE_IDLE;
+    return;
+  }
+  Serial.println(" - Found our service");
+
+  if(!writeChar(pRemoteService, 2, profile_bytes[0][profile]))
+  {
+    pClient->disconnect();
+    dirty = true;
+    state = STATE_IDLE;
+    return;
+  }
+  if(!writeChar(pRemoteService, 4, profile_bytes[1][profile]))
+  {
+    pClient->disconnect();
+    dirty = true;
+    state = STATE_IDLE;
+    return;
+  }
+  Serial.println(" - Profile Set");
+
+  pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUIDs[0]);
+  if (pRemoteCharacteristic == nullptr) {
+    Serial.print("Failed to find our characteristic UUID: ");
+    Serial.println(charUUIDs[0]);
+    pClient->disconnect();
+    dirty = true;
+    state = STATE_IDLE;
+    return;
+  }
+  Serial.println(" - Found our speed data char");
+
+  if(pRemoteCharacteristic->canNotify()) {
+    pRemoteCharacteristic->registerForNotify(notifyCallback);
+  } else {
+    Serial.println(" - But Cannot Notify?!?!");
+    pClient->disconnect();
+    dirty = true;
+    state = STATE_IDLE;
+    return;      
+  }
+
+  readBattery();
+
+  state = STATE_CONNECTED;    
+  //u8g2.clearBuffer();					// clear the internal memory
+  //u8g2.sendBuffer();					// transfer internal memory to the display
+  //u8g2.setPowerSave(1);
+  tft.fillScreen(TFT_BLACK); 
+  power_saving = true;
+}
+
+void loop() {
+  unsigned long now = seconds();  
+
+  if( !power_saving && 
+      !renderMenu && 
+      state != STATE_IDLE && 
+      (power_save_duration != 0) &&
+      (display_on_at + power_save_duration) < now) 
+  {
+    display_on_at = seconds();
+    //u8g2.setPowerSave(1);
+    power_saving = true;
+  }
+
+
+  button.tick();
+  if(dirty) {
+    if(power_saving) {
+      display_on_at = seconds();
+      //u8g2.setPowerSave(0);
+      power_saving = false;
+    }
+    if(renderMenu){
+      doRenderMenu();
+    }
+    dirty = false;
+  }
+
+  switch(state)
+  {
+    case STATE_IDLE:
+      digitalWrite(PIN_LED, LOW);
+      if(!dirty) { 
+        renderSearching();
+        do_scan(); 
+      }
+      break;
+    case STATE_CONNECTING:
+      connectToChrony();
+      break;
+    case STATE_CONNECTED:
+      if(now - chronyVBattLastRead > 5) {
+        readBattery();
+        chronyVBattLastRead = now;
+      }        
+      break;
+  }
+}
+
+
+/* 
+  Menu system
+*/
+
+
+static void sleepCallback(uint8_t param)
+{
+  Serial.printf("Good bye cruel world\n");
+  //u8g2.setPowerSave(1);
+  esp_deep_sleep_start();
+}
+
+static menuItem_t menu_sleep[] = {
+  { "Zzzz",  NULL, menu_sleep, NULL, NULL, sleepCallback, 0, NULL},
+};
+
+void menuItemGenStringCurSleep(char * buffer)
+{
+  sprintf(buffer, "[%s]", menu_sleep[0].menuString);
+  Serial.println(buffer);  
+}
+
+static const uint8_t power_save_duration_lut[] = {0,2,5,10};
+
+static void powerSaveCallback(uint8_t param)
+{
+  if(power_save_duration != power_save_duration_lut[param]) {
+    power_save_duration = power_save_duration_lut[param];
+    EEPROM.write(4, power_save_duration);
+    EEPROM.commit();
+  }  
+  Serial.printf("Menu Item Selected PWR SAVE %d\n", power_save_duration);
+  pCurrentMenuItem = menuStack[--menuStackIndex];
+}
+
+static menuItem_t menu_power_save[] = {
+  { "Off",  NULL, &menu_power_save[1], NULL, NULL, powerSaveCallback, 0, NULL},
+  { "2s",   NULL, &menu_power_save[2], NULL, NULL, powerSaveCallback, 1, NULL},
+  { "5s",   NULL, &menu_power_save[3], NULL, NULL, powerSaveCallback, 2, NULL},
+  { "10s",  NULL, &menu_power_save[0], NULL, NULL, powerSaveCallback, 3, NULL}
+};
+
+void menuItemGenStringCurPowerSaving(char * buffer)
+{
+  uint8_t idx = 0;
+  switch(power_save_duration)
+  {
+    case 2:  idx = 1;  break;
+    case 5:  idx = 2;  break;
+    case 10: idx = 3;  break;
+  }  
+  sprintf(buffer, "[%s]", menu_power_save[idx].menuString);
+  Serial.println(buffer);  
+}
+
+static void displayFlipCallback(uint8_t param)
+{
+  display_flip = param;
+  EEPROM.write(3, display_flip);
+  EEPROM.commit();
+  Serial.printf("Menu Item Selected DISPLAY_FLIP %d\n", display_flip);
+  //u8g2.setFlipMode(display_flip);
+  tft.setRotation(display_flip ? 1 : 3);
+  pCurrentMenuItem = menuStack[--menuStackIndex];
+}
+
+static menuItem_t menu_display_flip[] = {
+  { "Off",         NULL, &menu_display_flip[1], NULL, NULL, displayFlipCallback, DISPLAY_FLIP_OFF, NULL},
+  { "On",          NULL, &menu_display_flip[0], NULL, NULL, displayFlipCallback, DISPLAY_FLIP_ON, NULL}
+};
+
+void menuItemGenStringCurDisplayFlip(char * buffer)
+{
+  sprintf(buffer, "[%s]", menu_display_flip[display_flip].menuString);
+  Serial.println(buffer);  
+}
+
+static void unitsCallback(uint8_t param)
+{
+  units = param;
+  EEPROM.write(1, units);
+  EEPROM.commit();
+  Serial.printf("Menu Item Selected UNITS %d\n", units);
+  pCurrentMenuItem = menuStack[--menuStackIndex];
+}
+
+static menuItem_t menu_units[] = {
+  { "FPS",          NULL, &menu_units[1], NULL, NULL, unitsCallback, UNITS_IMPERIAL, NULL},
+  { "M/S",          NULL, &menu_units[0], NULL, NULL, unitsCallback, UNITS_METRIC, NULL}
+};
+
+void menuItemGenStringCurSelUnits(char * buffer)
+{
+  sprintf(buffer, "[%s]", menu_units[units].menuString);
+  Serial.println(buffer);  
+}
+
+static void profileCallback(uint8_t param)
+{
+  if(profile != param) {
+    profile = param;
+    EEPROM.write(2, profile);
+    EEPROM.commit();
+    profile_changed = true;
+  }  
+  Serial.printf("Menu Item Selected PROFILE %d\n", profile);
+  pCurrentMenuItem = menuStack[--menuStackIndex];
+}
+
+static menuItem_t menu_profile[] = {
+  { "Bow/Airsoft",  NULL, &menu_profile[1], NULL, NULL, profileCallback, PROFILE_BOW_AIRSOFT, NULL},
+  { "CO2 Pistol",   NULL, &menu_profile[2], NULL, NULL, profileCallback, PROFILE_CO2_PISTOL, NULL},
+  { "Air Pistol",   NULL, &menu_profile[3], NULL, NULL, profileCallback, PROFILE_AIR_PISTOL, NULL},
+  { "Air Gun UK",   NULL, &menu_profile[4], NULL, NULL, profileCallback, PROFILE_AIR_GUN_UK, NULL},
+  { "Air Gun FAC",  NULL, &menu_profile[0], NULL, NULL, profileCallback, PROFILE_AIR_GUN_FAC, NULL}
+};
+
+void menuItemGenStringCurSelProfile(char * buffer)
+{
+  sprintf(buffer, "[%s]", menu_profile[profile].menuString);
+  Serial.println(buffer);  
+}
+
+static void sensitivityIncCallback(uint8_t param)
+{
+  if(sensitivity <= 95){ 
+    sensitivity += 5;
+    EEPROM.write(0, sensitivity);
+    EEPROM.commit();
+    Serial.printf("Menu Item Selected SENSITIVITY INC %d\n", sensitivity);
+  }
+}
+static void sensitivityDecCallback(uint8_t param)
+{ 
+  if(sensitivity >= 5){
+    sensitivity -= 5;
+    EEPROM.write(0, sensitivity);
+    EEPROM.commit();
+    Serial.printf("Menu Item Selected SENSITIVITY DEC %d\n", sensitivity);
+  }
+}
+
+static menuItem_t menu_sensitivity[] = {
+  { "Increase",     NULL, &menu_sensitivity[1], NULL, NULL, sensitivityIncCallback, 0, NULL},
+  { "Decrease",     NULL, &menu_sensitivity[0], NULL, NULL, sensitivityDecCallback, 0, NULL}
+};
+
+void menuItemGenStringSensitivity(char * buffer)
+{
+  sprintf(buffer, "%d %%", sensitivity);
+  Serial.println(buffer);  
+}
+
+void menuItemGenStringCurSelSensitivity(char * buffer)
+{
+  sprintf(buffer, "[%d %%]", sensitivity);
+  Serial.println(buffer);  
+}
+
+
+static menuItem_t menu_top_level[] = {
+  { "Profile",      NULL, &menu_top_level[1], menu_profile,     menu_profile,     NULL, 0, menuItemGenStringCurSelProfile},
+  { "Min. Return", menuItemGenStringSensitivity, &menu_top_level[2], menu_sensitivity, menu_sensitivity, NULL, 0, menuItemGenStringCurSelSensitivity},
+  { "Units",        NULL, &menu_top_level[3], menu_units,       menu_units,       NULL, 0, menuItemGenStringCurSelUnits},
+  { "Display Flip", NULL, &menu_top_level[4], menu_display_flip,menu_display_flip,NULL, 0, menuItemGenStringCurDisplayFlip},
+  { "Power Save",   NULL, &menu_top_level[5], menu_power_save, menu_power_save,  NULL, 0, menuItemGenStringCurPowerSaving},
+  { "Sleep",        NULL, &menu_top_level[0], menu_sleep,      menu_sleep,        NULL, 0, menuItemGenStringCurSleep}
+  
+};
+
+static menuItem_t menu_entry = {  "Settings", NULL, menu_top_level, menu_top_level, NULL, NULL, 0, NULL };
+
+void singleClick()
+{
+  Serial.println("x1");
+  if(renderMenu)
+  {
+    dirty = true;
+    pCurrentMenuItem->currentSubMenu = pCurrentMenuItem->currentSubMenu->nextMenuItem;
+  } else {
+    if(power_saving) {
+      display_on_at = seconds();
+      //u8g2.setPowerSave(0);
+      power_saving = false;
+    }
+  }
+}
+
+void doubleClick()
+{
+  if(renderMenu)
+  {
+      dirty = true;
+      if(pCurrentMenuItem->currentSubMenu->menuItemCallback != NULL)
+      {
+          (*pCurrentMenuItem->currentSubMenu->menuItemCallback)(pCurrentMenuItem->currentSubMenu->param);
+      } else {
+          menuStack[menuStackIndex++] = pCurrentMenuItem;
+          pCurrentMenuItem = pCurrentMenuItem->currentSubMenu;
+      }
+  }
+  Serial.printf("x2 %d\n",menuStackIndex);
+}
+
+void longPressStop()
+{
+  if(renderMenu) {
+    if(menuStackIndex == 1) {
+      renderMenu = false;
+      //u8g2.clearBuffer();					// clear the internal memory
+      //u8g2.sendBuffer();					// transfer internal memory to the display
+      tft.fillScreen(TFT_BLACK);
+      if(profile_changed) {
+        pClient->disconnect();
+        state = STATE_IDLE;
+      }
+    } else {
+      dirty = true;
+      pCurrentMenuItem = menuStack[--menuStackIndex];
+    }
+  } else if(state == STATE_CONNECTED) {
+    profile_changed = false;
+    dirty = true;
+    renderMenu = true;
+    pCurrentMenuItem = &menu_entry;
+    menuStackIndex = 0;
+    menuStack[menuStackIndex++] = pCurrentMenuItem;
+  }
+  Serial.printf("LPS %s %d\n",renderMenu ? "Menu On" : "Menu Off", menuStackIndex);
+}
