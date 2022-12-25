@@ -29,5 +29,3 @@ Use the "Filter your Search" to search for and install "onebutton"
 7. Select the serial port your TTGO T-Display V1.1 is connected to
 
 8. Click the Arrow button to build and flash the software
-
-
