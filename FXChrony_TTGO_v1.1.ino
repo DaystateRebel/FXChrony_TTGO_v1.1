@@ -6,18 +6,16 @@
 #include <EEPROM.h>
 #include <esp_sleep.h>
 #include "esp_adc_cal.h"
+#include "pellet.h"
 
 TFT_eSPI tft = TFT_eSPI(135, 240); // Invoke custom library
 OpenFontRender render;
 
-#define EEPROM_SIZE 5
+#define EEPROM_SIZE 6
 
 static esp_adc_cal_characteristics_t adc_chars;
 
 #define PIN_INPUT 0
-
-#define PIN_LED 25
-
 OneButton button(PIN_INPUT, true);
 
 #define UNITS_IMPERIAL  0
@@ -81,13 +79,14 @@ static uint8_t units = UNITS_IMPERIAL;
 static uint8_t profile = PROFILE_AIR_GUN_FAC;
 static uint8_t display_flip = 0;
 static uint8_t power_save_duration = 0;
+static uint8_t pellet_index = 0;
 
 static uint32_t shot_count = 0;
 
 static uint8_t nc_counter = 0;
 
 typedef  void (* menuItemCallback_t)(uint8_t);
-typedef  void (* menuItemGenString_t)(char *);
+typedef  void (* menuItemGenString_t)(uint8_t, char *);
 
 typedef struct menuItem {
     const char * menuString;
@@ -100,6 +99,7 @@ typedef struct menuItem {
     menuItemGenString_t menuItemGenCurSelString;
 } menuItem_t;
 
+static menuItem_t * menu_pellet;
 static menuItem_t * menuStack[4];
 static int menuStackIndex;
 static menuItem_t * pCurrentMenuItem;
@@ -112,9 +112,6 @@ void setup() {
   button.attachLongPressStop(longPressStop);
   button.attachClick(singleClick);
   
-  pinMode(PIN_LED, OUTPUT);
-  digitalWrite(PIN_LED, LOW);
-
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(ADC1_CHANNEL_1, ADC_ATTEN_DB_11);
   esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &adc_chars);
@@ -151,9 +148,18 @@ void setup() {
     power_save_duration = 10;
     EEPROM.write(4, power_save_duration);
   }
+  pellet_index = EEPROM.read(5);
+  if(pellet_index >= NUM_PELLETS) {
+    pellet_index = 0;
+    EEPROM.write(5, pellet_index);
+  }
+
   EEPROM.commit();
  
   BLEDevice::init("");
+
+  build_pellet_menu();
+
   tft.init();
   tft.setRotation(display_flip ? 1 : 3);
 
@@ -182,7 +188,7 @@ void doRenderMenu() {
     pHeadertxt = pCurrentMenuItem->menuString;
   } else {
       pHeadertxt = genHeader;
-      pCurrentMenuItem->menuItemGenString(genHeader);
+      pCurrentMenuItem->menuItemGenString(pCurrentMenuItem->currentSubMenu->param, genHeader);
   }
 
   render.setFontSize(30);
@@ -196,7 +202,7 @@ void doRenderMenu() {
   const char * psubHeadertxt = pCurrentMenuItem->currentSubMenu->menuString;
   if(psubHeadertxt == NULL) {
       psubHeadertxt = genHeader;
-      pCurrentMenuItem->currentSubMenu->menuItemGenString(genHeader);
+      pCurrentMenuItem->currentSubMenu->menuItemGenString(pCurrentMenuItem->currentSubMenu->param, genHeader);
   }
 
   render.setFontSize(20);
@@ -210,7 +216,7 @@ void doRenderMenu() {
   const char * pcurSelHeadertxt;
   if(pCurrentMenuItem->currentSubMenu->menuItemGenCurSelString) {
       pcurSelHeadertxt = genHeader;
-      pCurrentMenuItem->currentSubMenu->menuItemGenCurSelString(genHeader);
+      pCurrentMenuItem->currentSubMenu->menuItemGenCurSelString(pCurrentMenuItem->currentSubMenu->param, genHeader);
 
       render.setFontSize(20);
       render.cdrawString(pcurSelHeadertxt,
@@ -320,7 +326,7 @@ void renderChronyVBatt(){
     font_color = TFT_RED;    
   }
   sprintf (temp_str, "C %.1fV", chronyVBattery);
-  render.setFontSize(20);
+  render.setFontSize(15);
   render.rdrawString(temp_str,
               tft.width(),
               0,
@@ -343,7 +349,7 @@ void renderDeviceVBatt() {
   }
 
   sprintf (temp_str, "D %.1fV", fbat);
-  render.setFontSize(20);
+  render.setFontSize(15);
   render.drawString(temp_str,
                 0,
                 0,
@@ -394,6 +400,7 @@ static void notifyCallback(
     speed <<= 8;
     speed |= ((char*)pData)[1];
 
+    float energy;
     float fspeed = speed;
 
     if(units == UNITS_IMPERIAL) {
@@ -404,27 +411,54 @@ static void notifyCallback(
       sprintf (sbuffer, "%d M/S", int(fspeed));
     }
     tft.fillScreen(TFT_BLACK);
-    render.setFontSize(50);
+    render.setFontSize(40);
     render.cdrawString(sbuffer,
                 tft.width()/2,
-                30,
+                15,
                 TFT_WHITE,
                 TFT_BLACK,
                 Layout::Horizontal);
-    sprintf (sbuffer, "Shot# %d", shot_count);
-    render.setFontSize(20);
+
+    /* Draw the Pellet energy */
+    if(units == UNITS_IMPERIAL) {
+      energy = (my_pellets[pellet_index].pellet_weight_grains * powf(fspeed, 2))/450240;
+      sprintf (sbuffer, "%.2f FPE", energy);
+    } else {
+      energy = 0.5 * (my_pellets[pellet_index].pellet_weight_grams / 100) * powf(fspeed, 2);
+      sprintf (sbuffer, "%.2f J", energy);
+    }
+    render.setFontSize(30);
     render.cdrawString(sbuffer,
                 tft.width()/2,
-                85,
+                57,
+                TFT_WHITE,
+                TFT_BLACK,
+                Layout::Horizontal);
+
+
+    render.setFontSize(20);
+
+    render.cdrawString(my_pellets[pellet_index].pellet_name,
+                tft.width()/2,
+                95,
+                TFT_WHITE,
+                TFT_BLACK,
+                Layout::Horizontal);
+
+    render.setFontSize(15);
+    
+    sprintf (sbuffer, "Shot# %d", shot_count);
+    render.drawString(sbuffer,
+                0,
+                120,
                 TFT_WHITE,
                 TFT_BLACK,
                 Layout::Horizontal);
 
     sprintf (sbuffer, "Return %d%%", r);
-    render.setFontSize(20);
-    render.cdrawString(sbuffer,
-                tft.width()/2,
-                110,
+    render.rdrawString(sbuffer,
+                tft.width(),
+                120,
                 TFT_WHITE,
                 TFT_BLACK,
                 Layout::Horizontal);
@@ -434,7 +468,6 @@ static void notifyCallback(
   }
   nc_counter++;
   nc_counter %= 5;
-  digitalWrite(PIN_LED, nc_counter == 0 ? HIGH : LOW);
 }
 
 uint8_t profile_bytes[2][5] = {{0x32, 0x32, 0x32, 0x32, 0x64},{0x17, 0x1E, 0x2D, 0x43, 0x5A}};
@@ -523,7 +556,6 @@ void loop() {
   switch(state)
   {
     case STATE_IDLE:
-      digitalWrite(PIN_LED, LOW);
       if(!dirty) { 
         renderSearching();
         do_scan(); 
@@ -557,7 +589,7 @@ static menuItem_t menu_sleep[] = {
   { "Zzzz",  NULL, menu_sleep, NULL, NULL, sleepCallback, 0, NULL},
 };
 
-void menuItemGenStringCurSleep(char * buffer)
+void menuItemGenStringCurSleep(uint8_t, char * buffer)
 {
   sprintf(buffer, "[%s]", menu_sleep[0].menuString);
 }
@@ -581,7 +613,7 @@ static menuItem_t menu_power_save[] = {
   { "10s",  NULL, &menu_power_save[0], NULL, NULL, powerSaveCallback, 3, NULL}
 };
 
-void menuItemGenStringCurPowerSaving(char * buffer)
+void menuItemGenStringCurPowerSaving(uint8_t, char * buffer)
 {
   uint8_t idx = 0;
   switch(power_save_duration)
@@ -607,7 +639,7 @@ static menuItem_t menu_display_flip[] = {
   { "On",          NULL, &menu_display_flip[0], NULL, NULL, displayFlipCallback, DISPLAY_FLIP_ON, NULL}
 };
 
-void menuItemGenStringCurDisplayFlip(char * buffer)
+void menuItemGenStringCurDisplayFlip(uint8_t, char * buffer)
 {
   sprintf(buffer, "[%s]", menu_display_flip[display_flip].menuString);
 }
@@ -625,7 +657,7 @@ static menuItem_t menu_units[] = {
   { "M/S",          NULL, &menu_units[0], NULL, NULL, unitsCallback, UNITS_METRIC, NULL}
 };
 
-void menuItemGenStringCurSelUnits(char * buffer)
+void menuItemGenStringCurSelUnits(uint8_t, char * buffer)
 {
   sprintf(buffer, "[%s]", menu_units[units].menuString);
 }
@@ -649,7 +681,7 @@ static menuItem_t menu_profile[] = {
   { "Air Gun FAC",  NULL, &menu_profile[0], NULL, NULL, profileCallback, PROFILE_AIR_GUN_FAC, NULL}
 };
 
-void menuItemGenStringCurSelProfile(char * buffer)
+void menuItemGenStringCurSelProfile(uint8_t, char * buffer)
 {
   sprintf(buffer, "[%s]", menu_profile[profile].menuString);
 }
@@ -676,26 +708,70 @@ static menuItem_t menu_sensitivity[] = {
   { "Decrease",     NULL, &menu_sensitivity[0], NULL, NULL, sensitivityDecCallback, 0, NULL}
 };
 
-void menuItemGenStringSensitivity(char * buffer)
+void menuItemGenStringSensitivity(uint8_t, char * buffer)
 {
   sprintf(buffer, "%d %%", sensitivity);
 }
 
-void menuItemGenStringCurSelSensitivity(char * buffer)
+void menuItemGenStringCurSelSensitivity(uint8_t, char * buffer)
 {
   sprintf(buffer, "[%d %%]", sensitivity);
 }
 
+static void selectPelletCallback(uint8_t param)
+{
+  Serial.printf("selectPelletCallback %d\n",param);  
+  pellet_index = param;
+  EEPROM.write(5, pellet_index);
+  EEPROM.commit();
+  pCurrentMenuItem = menuStack[--menuStackIndex];
+}
+
+void menuItemGenStringPellet(uint8_t i, char * buffer)
+{
+  if(units == UNITS_IMPERIAL) {
+    sprintf(buffer, "%s %.3f %.3f", my_pellets[i].pellet_mfr, my_pellets[i].pellet_weight_grains, my_pellets[i].pellet_calibre_inch);
+  } else {
+    sprintf(buffer, "%s %.3f %.3f", my_pellets[i].pellet_mfr, my_pellets[i].pellet_weight_grams, my_pellets[i].pellet_calibre_mm);
+  }
+  Serial.println(buffer);  
+}
+
+void menuItemGenStringCurSelPellet(uint8_t i, char * buffer)
+{
+  sprintf(buffer, "[%s]",my_pellets[pellet_index].pellet_name);
+  Serial.println(buffer);  
+}
 
 static menuItem_t menu_top_level[] = {
   { "Profile",      NULL, &menu_top_level[1], menu_profile,     menu_profile,     NULL, 0, menuItemGenStringCurSelProfile},
-  { "Min. Return", menuItemGenStringSensitivity, &menu_top_level[2], menu_sensitivity, menu_sensitivity, NULL, 0, menuItemGenStringCurSelSensitivity},
-  { "Units",        NULL, &menu_top_level[3], menu_units,       menu_units,       NULL, 0, menuItemGenStringCurSelUnits},
-  { "Display Flip", NULL, &menu_top_level[4], menu_display_flip,menu_display_flip,NULL, 0, menuItemGenStringCurDisplayFlip},
-  { "Power Save",   NULL, &menu_top_level[5], menu_power_save, menu_power_save,  NULL, 0, menuItemGenStringCurPowerSaving},
+  { "Pellet",       NULL, &menu_top_level[2], NULL,             NULL,             NULL, 0, menuItemGenStringCurSelPellet},
+  { "Min. Return", menuItemGenStringSensitivity, &menu_top_level[3], menu_sensitivity, menu_sensitivity, NULL, 0, menuItemGenStringCurSelSensitivity},
+  { "Units",        NULL, &menu_top_level[4], menu_units,       menu_units,       NULL, 0, menuItemGenStringCurSelUnits},
+  { "Display Flip", NULL, &menu_top_level[5], menu_display_flip,menu_display_flip,NULL, 0, menuItemGenStringCurDisplayFlip},
+  { "Power Save",   NULL, &menu_top_level[6], menu_power_save, menu_power_save,  NULL, 0, menuItemGenStringCurPowerSaving},
   { "Sleep",        NULL, &menu_top_level[0], menu_sleep,      menu_sleep,        NULL, 0, menuItemGenStringCurSleep}
   
 };
+
+void build_pellet_menu()
+{
+  uint8_t i;
+  menu_pellet = (menuItem_t *)malloc(NUM_PELLETS * sizeof(menuItem_t));
+  for(i=0;i<NUM_PELLETS;i++) {
+    menu_pellet[i].menuString = my_pellets[i].pellet_name;
+    menu_pellet[i].menuItemGenString = NULL;
+    menu_pellet[i].nextMenuItem = ((i == NUM_PELLETS - 1) ? &menu_pellet[0] : &menu_pellet[i+1]);
+    menu_pellet[i].currentSubMenu = NULL;
+    menu_pellet[i].subMenu = NULL;
+    menu_pellet[i].menuItemCallback = selectPelletCallback;
+    menu_pellet[i].param = i;
+    menu_pellet[i].menuItemGenCurSelString = menuItemGenStringPellet;
+  }
+  menu_top_level[1].currentSubMenu = menu_pellet;
+  menu_top_level[1].subMenu = menu_pellet;
+}
+
 
 static menuItem_t menu_entry = {  "Settings", NULL, menu_top_level, menu_top_level, NULL, NULL, 0, NULL };
 
