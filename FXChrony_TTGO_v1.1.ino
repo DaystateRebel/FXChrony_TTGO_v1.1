@@ -420,7 +420,7 @@ static void notifyCallback(
       energy = (my_pellets[pellet_index].pellet_weight_grains * powf(fspeed, 2))/450240;
       sprintf (sbuffer, "%.2f FPE", energy);
     } else {
-      energy = 0.5 * (my_pellets[pellet_index].pellet_weight_grams / 100) * powf(fspeed, 2);
+      energy = 0.5 * (my_pellets[pellet_index].pellet_weight_grams / 1000) * powf(fspeed, 2);
       sprintf (sbuffer, "%.2f J", energy);
     }
     render.setFontSize(30);
