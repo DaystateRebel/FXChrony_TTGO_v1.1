@@ -7,6 +7,7 @@
 #include <esp_sleep.h>
 #include "esp_adc_cal.h"
 #include "pellet.h"
+#include "gun.h"
 
 TFT_eSPI tft = TFT_eSPI(135, 240); // Invoke custom library
 OpenFontRender render;
@@ -21,13 +22,6 @@ OneButton button(PIN_INPUT, true);
 #define UNITS_IMPERIAL  0
 #define UNITS_METRIC    1
 #define UNITS_MAX       1
-
-#define PROFILE_BOW_AIRSOFT 0
-#define PROFILE_CO2_PISTOL  1
-#define PROFILE_AIR_PISTOL  2
-#define PROFILE_AIR_GUN_UK  3
-#define PROFILE_AIR_GUN_FAC 4
-#define PROFILE_MAX         4
 
 #define DISPLAY_FLIP_OFF    0
 #define DISPLAY_FLIP_ON     1
@@ -76,10 +70,11 @@ static uint8_t searching_ctr = 0;
 
 static uint8_t sensitivity = 50;
 static uint8_t units = UNITS_IMPERIAL;
-static uint8_t profile = PROFILE_AIR_GUN_FAC;
+
 static uint8_t display_flip = 0;
 static uint8_t power_save_duration = 0;
 static uint8_t pellet_index = 0;
+static uint8_t gun_index = 0;
 
 static uint32_t shot_count = 0;
 
@@ -99,7 +94,8 @@ typedef struct menuItem {
     menuItemGenString_t menuItemGenCurSelString;
 } menuItem_t;
 
-static menuItem_t * menu_pellet;
+static menuItem_t * menu_gun = NULL;
+static menuItem_t * menu_pellet = NULL;
 static menuItem_t * menuStack[4];
 static int menuStackIndex;
 static menuItem_t * pCurrentMenuItem;
@@ -133,10 +129,10 @@ void setup() {
     units = UNITS_MAX;
     EEPROM.write(1, units);
   }
-  profile = EEPROM.read(2);
-  if(profile > PROFILE_MAX) {
-    profile = PROFILE_MAX;
-    EEPROM.write(2, profile);
+  gun_index = EEPROM.read(2);
+  if(gun_index >= NUM_GUNS) {
+    gun_index = 0;
+    EEPROM.write(2, gun_index);
   }
   display_flip = EEPROM.read(3);
   if(display_flip > DISPLAY_FLIP_MAX) {
@@ -158,7 +154,7 @@ void setup() {
  
   BLEDevice::init("");
 
-  build_pellet_menu();
+  build_gun_menu();
 
   tft.init();
   tft.setRotation(display_flip ? 1 : 3);
@@ -180,7 +176,7 @@ void setup() {
 }
 
 void doRenderMenu() {
-  char genHeader[16];
+  char genHeader[256];
   tft.fillScreen(TFT_BLACK);
 
   const char * pHeadertxt;
@@ -385,7 +381,7 @@ static void notifyCallback(
   uint8_t* pData,
   size_t length,
   bool isNotify) {
-  char sbuffer[16];
+  char sbuffer[256];
   // Third byte is return in steps of 5%, anything better than 10% we display  
   uint8_t r = ((char*)pData)[2] * 5;
   uint16_t speed;    
@@ -438,7 +434,8 @@ static void notifyCallback(
 
     render.setFontSize(20);
 
-    render.cdrawString(my_pellets[pellet_index].pellet_name,
+    sprintf(sbuffer, "%s / %s", my_guns[gun_index].gun_name, my_pellets[pellet_index].pellet_name);
+    render.cdrawString(sbuffer,
                 tft.width()/2,
                 95,
                 TFT_WHITE,
@@ -487,14 +484,14 @@ void connectToChrony() {
     return;
   }
 
-  if(!writeChar(pRemoteService, 2, profile_bytes[0][profile]))
+  if(!writeChar(pRemoteService, 2, profile_bytes[0][my_guns[gun_index].gun_profile]))
   {
     pClient->disconnect();
     dirty = true;
     state = STATE_IDLE;
     return;
   }
-  if(!writeChar(pRemoteService, 4, profile_bytes[1][profile]))
+  if(!writeChar(pRemoteService, 4, profile_bytes[1][my_guns[gun_index].gun_profile]))
   {
     pClient->disconnect();
     dirty = true;
@@ -662,30 +659,6 @@ void menuItemGenStringCurSelUnits(uint8_t, char * buffer)
   sprintf(buffer, "[%s]", menu_units[units].menuString);
 }
 
-static void profileCallback(uint8_t param)
-{
-  if(profile != param) {
-    profile = param;
-    EEPROM.write(2, profile);
-    EEPROM.commit();
-    profile_changed = true;
-  }  
-  pCurrentMenuItem = menuStack[--menuStackIndex];
-}
-
-static menuItem_t menu_profile[] = {
-  { "Bow/Airsoft",  NULL, &menu_profile[1], NULL, NULL, profileCallback, PROFILE_BOW_AIRSOFT, NULL},
-  { "CO2 Pistol",   NULL, &menu_profile[2], NULL, NULL, profileCallback, PROFILE_CO2_PISTOL, NULL},
-  { "Air Pistol",   NULL, &menu_profile[3], NULL, NULL, profileCallback, PROFILE_AIR_PISTOL, NULL},
-  { "Air Gun UK",   NULL, &menu_profile[4], NULL, NULL, profileCallback, PROFILE_AIR_GUN_UK, NULL},
-  { "Air Gun FAC",  NULL, &menu_profile[0], NULL, NULL, profileCallback, PROFILE_AIR_GUN_FAC, NULL}
-};
-
-void menuItemGenStringCurSelProfile(uint8_t, char * buffer)
-{
-  sprintf(buffer, "[%s]", menu_profile[profile].menuString);
-}
-
 static void sensitivityIncCallback(uint8_t param)
 {
   if(sensitivity <= 95){ 
@@ -730,9 +703,9 @@ static void selectPelletCallback(uint8_t param)
 void menuItemGenStringPellet(uint8_t i, char * buffer)
 {
   if(units == UNITS_IMPERIAL) {
-    sprintf(buffer, "%s %.3f %.3f", my_pellets[i].pellet_mfr, my_pellets[i].pellet_weight_grains, my_pellets[i].pellet_calibre_inch);
+    sprintf(buffer, "%s %.3f %.3f", my_pellets[i].pellet_mfr, my_pellets[i].pellet_weight_grains, my_pellets[i].pellet_caliber_inch);
   } else {
-    sprintf(buffer, "%s %.3f %.3f", my_pellets[i].pellet_mfr, my_pellets[i].pellet_weight_grams, my_pellets[i].pellet_calibre_mm);
+    sprintf(buffer, "%s %.3f %.3f", my_pellets[i].pellet_mfr, my_pellets[i].pellet_weight_grams, my_pellets[i].pellet_caliber_mm);
   }
   Serial.println(buffer);  
 }
@@ -743,8 +716,34 @@ void menuItemGenStringCurSelPellet(uint8_t i, char * buffer)
   Serial.println(buffer);  
 }
 
+static void selectGunCallback(uint8_t param)
+{
+  gun_index = param;
+  EEPROM.write(2, gun_index);
+  pCurrentMenuItem = menuStack[--menuStackIndex];
+  build_pellet_menu();
+  pellet_index = menu_pellet[0].param;
+  EEPROM.write(5, pellet_index);
+  EEPROM.commit();
+  profile_changed = true;
+}
+
+void menuItemGenStringGun(uint8_t i, char * buffer)
+{
+  if(units == UNITS_IMPERIAL) {
+    sprintf(buffer, "%s %.3f", my_guns[i].gun_mfr, my_guns[i].gun_caliber_inch);
+  } else {
+    sprintf(buffer, "%s %.3f", my_guns[i].gun_mfr, my_guns[i].gun_caliber_mm);
+  }
+}
+
+void menuItemGenStringCurSelGun(uint8_t i, char * buffer)
+{
+  sprintf(buffer, "[%s]",my_guns[gun_index].gun_name);
+}
+
 static menuItem_t menu_top_level[] = {
-  { "Profile",      NULL, &menu_top_level[1], menu_profile,     menu_profile,     NULL, 0, menuItemGenStringCurSelProfile},
+  { "Gun",          NULL, &menu_top_level[1], NULL,             NULL,             NULL, 0, menuItemGenStringCurSelGun},
   { "Pellet",       NULL, &menu_top_level[2], NULL,             NULL,             NULL, 0, menuItemGenStringCurSelPellet},
   { "Min. Return", menuItemGenStringSensitivity, &menu_top_level[3], menu_sensitivity, menu_sensitivity, NULL, 0, menuItemGenStringCurSelSensitivity},
   { "Units",        NULL, &menu_top_level[4], menu_units,       menu_units,       NULL, 0, menuItemGenStringCurSelUnits},
@@ -754,24 +753,75 @@ static menuItem_t menu_top_level[] = {
   
 };
 
-void build_pellet_menu()
+bool is_pellet_for_gun(uint8_t pidx)
 {
-  uint8_t i;
-  menu_pellet = (menuItem_t *)malloc(NUM_PELLETS * sizeof(menuItem_t));
-  for(i=0;i<NUM_PELLETS;i++) {
-    menu_pellet[i].menuString = my_pellets[i].pellet_name;
-    menu_pellet[i].menuItemGenString = NULL;
-    menu_pellet[i].nextMenuItem = ((i == NUM_PELLETS - 1) ? &menu_pellet[0] : &menu_pellet[i+1]);
-    menu_pellet[i].currentSubMenu = NULL;
-    menu_pellet[i].subMenu = NULL;
-    menu_pellet[i].menuItemCallback = selectPelletCallback;
-    menu_pellet[i].param = i;
-    menu_pellet[i].menuItemGenCurSelString = menuItemGenStringPellet;
+  bool result = false;
+
+  if (units == UNITS_IMPERIAL) {
+    result = ((my_pellets[pidx].pellet_caliber_inch != 0) && (my_guns[gun_index].gun_caliber_inch != 0)) && (my_pellets[pidx].pellet_caliber_inch == my_guns[gun_index].gun_caliber_inch);    
+  } else {
+    result = ((my_pellets[pidx].pellet_caliber_mm != 0) && (my_guns[gun_index].gun_caliber_mm != 0)) && (my_pellets[pidx].pellet_caliber_mm == my_guns[gun_index].gun_caliber_mm);
   }
-  menu_top_level[1].currentSubMenu = menu_pellet;
-  menu_top_level[1].subMenu = menu_pellet;
+  return result;
 }
 
+uint8_t num_pellets_for_gun()
+{
+  uint8_t i, pcnt = 0;
+  for(i=0;i<NUM_PELLETS;i++) {
+    if(is_pellet_for_gun(i)) {
+      pcnt += 1;
+    }
+  }
+  return pcnt;
+}
+
+void build_pellet_menu()
+{
+  uint8_t i, npellets, nctr = 0;
+  if(menu_pellet) {
+    free(menu_pellet);
+  }
+  npellets = num_pellets_for_gun();
+
+  menu_pellet = (menuItem_t *)malloc(npellets * sizeof(menuItem_t));
+
+  for(i=0;i<NUM_PELLETS;i++) {
+    if(is_pellet_for_gun(i)) {
+      menu_pellet[nctr].menuString = my_pellets[i].pellet_name;
+      menu_pellet[nctr].menuItemGenString = NULL;
+      menu_pellet[nctr].nextMenuItem = ((nctr == npellets - 1) ? &menu_pellet[0] : &menu_pellet[nctr+1]);
+      menu_pellet[nctr].currentSubMenu = NULL;
+      menu_pellet[nctr].subMenu = NULL;
+      menu_pellet[nctr].menuItemCallback = selectPelletCallback;
+      menu_pellet[nctr].param = i;
+      menu_pellet[nctr].menuItemGenCurSelString = menuItemGenStringPellet;
+      nctr += 1;
+    }
+    menu_top_level[1].currentSubMenu = menu_pellet;
+    menu_top_level[1].subMenu = menu_pellet;
+  }
+}
+
+//Name, Manufacturer, caliber in inches, caliber in mm, profile (speed range)
+void build_gun_menu()
+{
+  uint8_t i;
+  menu_gun = (menuItem_t *)malloc(NUM_GUNS * sizeof(menuItem_t));
+  for(i=0;i<NUM_GUNS;i++) {
+    menu_gun[i].menuString = my_guns[i].gun_name;
+    menu_gun[i].menuItemGenString = NULL;
+    menu_gun[i].nextMenuItem = ((i == NUM_GUNS - 1) ? &menu_gun[0] : &menu_gun[i+1]);
+    menu_gun[i].currentSubMenu = NULL;
+    menu_gun[i].subMenu = NULL;
+    menu_gun[i].menuItemCallback = selectGunCallback;
+    menu_gun[i].param = i;
+    menu_gun[i].menuItemGenCurSelString = menuItemGenStringGun;
+  }
+  menu_top_level[0].currentSubMenu = menu_gun;
+  menu_top_level[0].subMenu = menu_gun;
+  build_pellet_menu();
+}
 
 static menuItem_t menu_entry = {  "Settings", NULL, menu_top_level, menu_top_level, NULL, NULL, 0, NULL };
 
@@ -824,6 +874,7 @@ void longPressStop()
     dirty = true;
     renderMenu = true;
     pCurrentMenuItem = &menu_entry;
+    menu_entry.currentSubMenu = menu_top_level;
     menuStackIndex = 0;
     menuStack[menuStackIndex++] = pCurrentMenuItem;
   }
