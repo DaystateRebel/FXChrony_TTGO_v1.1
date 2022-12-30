@@ -168,11 +168,6 @@ void setup() {
     power_save_duration = 60;
     EEPROM.write(4, power_save_duration);
   }
-  pellet_index = EEPROM.read(5);
-  if(pellet_index >= NUM_PELLETS) {
-    pellet_index = 0;
-    EEPROM.write(5, pellet_index);
-  }
 
   EEPROM.commit();
  
@@ -746,8 +741,6 @@ void menuItemGenStringCurSelSensitivity(uint8_t, char * buffer)
 static void selectPelletCallback(uint8_t param)
 {
   pellet_index = param;
-  EEPROM.write(5, pellet_index);
-  EEPROM.commit();
   pCurrentMenuItem = menuStack[--menuStackIndex];
 }
 
@@ -769,11 +762,10 @@ static void selectGunCallback(uint8_t param)
 {
   gun_index = param;
   EEPROM.write(2, gun_index);
+  EEPROM.commit();
   pCurrentMenuItem = menuStack[--menuStackIndex];
   build_pellet_menu();
   pellet_index = menu_pellet[0].param;
-  EEPROM.write(5, pellet_index);
-  EEPROM.commit();
   profile_changed = true;
 }
 
