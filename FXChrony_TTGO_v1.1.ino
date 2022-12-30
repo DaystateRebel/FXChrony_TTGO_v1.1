@@ -110,11 +110,9 @@ static menuItem_t * pCurrentMenuItem;
 
 class MyClientCallback : public BLEClientCallbacks {
   void onConnect(BLEClient* pclient) {
-    Serial.println("onConnect");
   }
 
   void onDisconnect(BLEClient* pclient) {
-    Serial.println("onDisconnect");
     /* this make me sad, can't get the code to reliably reconnect 
     more than 4-5 times so here it is ... 
     (On the plus side it seems to work well and I can get 
@@ -747,7 +745,6 @@ void menuItemGenStringCurSelSensitivity(uint8_t, char * buffer)
 
 static void selectPelletCallback(uint8_t param)
 {
-  Serial.printf("selectPelletCallback %d\n",param);  
   pellet_index = param;
   EEPROM.write(5, pellet_index);
   EEPROM.commit();
@@ -761,7 +758,6 @@ void menuItemGenStringPellet(uint8_t i, char * buffer)
   } else {
     sprintf(buffer, "%s %.3f %.3f", my_pellets[i].pellet_mfr, my_pellets[i].pellet_weight_grams, my_pellets[i].pellet_caliber_mm);
   }
-  Serial.println(buffer);  
 }
 
 void menuItemGenStringCurSelPellet(uint8_t i, char * buffer)
@@ -1062,7 +1058,6 @@ void longPressStop()
         renderMenu = false;
         tft.fillScreen(TFT_BLACK);
         if(profile_changed) {
-          Serial.println("P changed\n");
           ESP.restart();
           while(1){}
         }
