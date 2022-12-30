@@ -1,4 +1,4 @@
-/* Don't mess with this bit unless 
+ /* Don't mess with this bit unless 
    you know what you're doing */
 
 typedef struct gun {
