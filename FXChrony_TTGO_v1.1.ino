@@ -648,9 +648,9 @@ static menuItem_t menu_power_save[] = {
   { "Off",  NULL, &menu_power_save[1], NULL, NULL, powerSaveCallback, 0, NULL},
   { "2s",   NULL, &menu_power_save[2], NULL, NULL, powerSaveCallback, 1, NULL},
   { "5s",   NULL, &menu_power_save[3], NULL, NULL, powerSaveCallback, 2, NULL},
-  { "10s",  NULL, &menu_power_save[0], NULL, NULL, powerSaveCallback, 3, NULL},
-  { "20s",  NULL, &menu_power_save[0], NULL, NULL, powerSaveCallback, 4, NULL},
-  { "40s",  NULL, &menu_power_save[0], NULL, NULL, powerSaveCallback, 5, NULL},
+  { "10s",  NULL, &menu_power_save[4], NULL, NULL, powerSaveCallback, 3, NULL},
+  { "20s",  NULL, &menu_power_save[5], NULL, NULL, powerSaveCallback, 4, NULL},
+  { "40s",  NULL, &menu_power_save[6], NULL, NULL, powerSaveCallback, 5, NULL},
   { "60s",  NULL, &menu_power_save[0], NULL, NULL, powerSaveCallback, 6, NULL},
 };
 
@@ -834,7 +834,6 @@ static void shotStringDumpCallback(uint8_t param)
 {
   shot_stats_t stats;
   uint8_t i, scnt = get_string_length(gun_index);
-  pCurrentMenuItem = menuStack[--menuStackIndex];
   Serial.printf("Shot String\n");
   Serial.printf("Gun %s %s\n",my_guns[gun_index].gun_mfr, my_guns[gun_index].gun_name);
   if(units == UNITS_IMPERIAL) {
@@ -911,10 +910,42 @@ static void shotStringStatsCallback(uint8_t param)
   sleep(5);
 }
 
+
+static uint8_t review_counter;
+
+void menuItemGenStringShotStringReview(uint8_t, char * buffer)
+{
+  if(get_string_length(gun_index) == 0){
+    sprintf(buffer, "0/0: ---");
+  } else {
+    sprintf(buffer, "%d/%d: %d", review_counter + 1, get_string_length(gun_index), (int)get_shot(gun_index, review_counter));
+    review_counter++;
+    if(review_counter >= get_string_length(gun_index)){
+      review_counter = 0;
+    }
+  }
+}
+
+void menuItemGenStringCurSelReview(uint8_t, char * buffer)
+{
+  sprintf(buffer, "");
+  review_counter = 0; 
+}
+
+void shotStringReviewCallback(uint8_t)
+{
+  
+}
+
+static menuItem_t menu_shot_string_review[] = {
+  { "Next",       NULL, &menu_shot_string_review[0], NULL, NULL, shotStringReviewCallback, 0, NULL},
+};
+
 static menuItem_t menu_shot_string[] = {
   { "Stats",       NULL, &menu_shot_string[1], NULL, NULL, shotStringStatsCallback, 0, NULL},
-  { "Clear",       NULL, &menu_shot_string[2], NULL, NULL, shotStringClearCallback, 0, NULL},
+  { "Review",      menuItemGenStringShotStringReview, &menu_shot_string[2], menu_shot_string_review, menu_shot_string_review, NULL, 0, menuItemGenStringCurSelReview},
   { "Dump",        NULL, &menu_shot_string[3], NULL, NULL, shotStringDumpCallback, 0, NULL},
+  { "Clear",       NULL, &menu_shot_string[4], NULL, NULL, shotStringClearCallback, 0, NULL},
   { "Initialise",  NULL, &menu_shot_string[0], NULL, NULL, shotStringInitCallback, 0, NULL}
 };
 
@@ -983,6 +1014,7 @@ void build_pellet_menu()
     }
     menu_top_level[1].currentSubMenu = menu_pellet;
     menu_top_level[1].subMenu = menu_pellet;
+    pellet_index = menu_pellet[0].param;
   }
 }
 
@@ -1027,36 +1059,36 @@ void doubleClick()
 {
   if(renderMenu)
   {
-      dirty = true;
-      if(pCurrentMenuItem->currentSubMenu->menuItemCallback != NULL)
-      {
-          (*pCurrentMenuItem->currentSubMenu->menuItemCallback)(pCurrentMenuItem->currentSubMenu->param);
-      } else {
-          menuStack[menuStackIndex++] = pCurrentMenuItem;
-          pCurrentMenuItem = pCurrentMenuItem->currentSubMenu;
+    dirty = true;
+
+    if(pCurrentMenuItem->currentSubMenu->menuItemCallback != NULL)
+    {
+      (*pCurrentMenuItem->currentSubMenu->menuItemCallback)(pCurrentMenuItem->currentSubMenu->param);
+    } else {
+      if(pCurrentMenuItem->currentSubMenu != NULL) {
+        menuStack[menuStackIndex++] = pCurrentMenuItem;
+        pCurrentMenuItem = pCurrentMenuItem->currentSubMenu;
       }
+    }
   }
 }
 
 void longPressStop()
 {
   if(renderMenu) {
-    if(state == STATE_OFFLINE) {
+    if(menuStackIndex == 1) {
       renderMenu = false;
       tft.fillScreen(TFT_BLACK);
-      state = STATE_IDLE;
-    }else { 
-      if(menuStackIndex == 1) {
-        renderMenu = false;
-        tft.fillScreen(TFT_BLACK);
-        if(profile_changed) {
-          ESP.restart();
-          while(1){}
-        }
-      } else {
-        dirty = true;
-        pCurrentMenuItem = menuStack[--menuStackIndex];
+      if(profile_changed) {
+        ESP.restart();
+        while(1){}
       }
+      if(state == STATE_OFFLINE) {
+        state = STATE_IDLE;
+      }
+    } else {
+      dirty = true;
+      pCurrentMenuItem = menuStack[--menuStackIndex];
     }
   } else if(state == STATE_CONNECTED) {
     profile_changed = false;
