@@ -13,7 +13,11 @@ TFT_eSPI tft = TFT_eSPI(135, 240); // Invoke custom library
 OpenFontRender render;
 
 #define SHOT_STRING_LENGTH  20
-#define EEPROM_SIZE (6 + (NUM_GUNS * (SHOT_STRING_LENGTH * sizeof(float) + 1)))
+// [0] = shot string length
+// [1] = pellet_idx
+// SHOT_STRING_LENGTH * shots
+#define EEPROM_PER_GUN (SHOT_STRING_LENGTH * sizeof(float) + 2)
+#define EEPROM_SIZE (6 + EEPROM_PER_GUN * NUM_GUNS)
 
 static esp_adc_cal_characteristics_t adc_chars;
 
@@ -75,7 +79,6 @@ static uint8_t units = UNITS_IMPERIAL;
 
 static uint8_t display_flip = 0;
 static uint8_t power_save_duration = 0;
-static uint8_t pellet_index = 0;
 static uint8_t gun_index = 0;
 
 static uint8_t nc_counter = 0;
@@ -168,9 +171,8 @@ void setup() {
     power_save_duration = 60;
     EEPROM.write(4, power_save_duration);
   }
-
   EEPROM.commit();
- 
+
   BLEDevice::init("");
 
   build_gun_menu();
@@ -195,31 +197,42 @@ void setup() {
 }
 
 uint8_t get_string_length(uint8_t gidx) {
-  return EEPROM.read(6 + (gidx * (SHOT_STRING_LENGTH * sizeof(float) + 1)));
+  return EEPROM.read(6 + (gidx * EEPROM_PER_GUN));
 }
 
 void clear_string(uint8_t gidx) {
-  EEPROM.write(6 + (gidx * (SHOT_STRING_LENGTH * sizeof(float) + 1)), 0);
+  EEPROM.write(6 + (gidx * EEPROM_PER_GUN), 0);
   EEPROM.commit();
 }
 
 float get_shot(uint8_t gidx, uint8_t sidx) {
   float result;
-  EEPROM.get(6 + (gidx * (SHOT_STRING_LENGTH * sizeof(float) + 1)) + sidx * sizeof(float) + 1, result);
+  EEPROM.get(6 + (gidx * EEPROM_PER_GUN) + sidx * sizeof(float) + 2, result);
   return result;
 }
 
 bool add_shot(uint8_t gidx, float speed) {
   uint8_t sidx = get_string_length(gidx);
   if(sidx < SHOT_STRING_LENGTH) {
-    EEPROM.put(6 + (gidx * (SHOT_STRING_LENGTH * sizeof(float) + 1)) + sidx * sizeof(float) + 1, speed);
-    EEPROM.write(6 + (gidx * (SHOT_STRING_LENGTH * sizeof(float) + 1)), sidx + 1);
+    EEPROM.put(6 + (gidx * EEPROM_PER_GUN) + sidx * sizeof(float) + 2, speed);
+    EEPROM.write(6 + (gidx * EEPROM_PER_GUN), sidx + 1);
     EEPROM.commit();
     return true;
   }
   return false;
 }
 
+uint8_t get_pellet_index(uint8_t gidx) 
+{
+  return EEPROM.read(6 + (gidx * EEPROM_PER_GUN) + 1);
+}
+
+void set_pellet_index(uint8_t gidx, uint8_t pidx) 
+{
+  EEPROM.write(6 + (gidx * EEPROM_PER_GUN) + 1, pidx);
+  EEPROM.commit();
+  get_pellet_index(gidx); 
+}
 
 void doRenderMenu() {
   char genHeader[256];
@@ -418,6 +431,7 @@ static void notifyCallback(
   char sbuffer[256];
   // Third byte is return in steps of 5%, anything better than 10% we display  
   uint8_t r = ((char*)pData)[2] * 5;
+  uint8_t pellet_index = get_pellet_index(gun_index);
   uint16_t speed;
   uint16_t shot_color;
   if((r >= sensitivity) && !renderMenu) {
@@ -740,7 +754,7 @@ void menuItemGenStringCurSelSensitivity(uint8_t, char * buffer)
 
 static void selectPelletCallback(uint8_t param)
 {
-  pellet_index = param;
+  set_pellet_index(gun_index, param);
   pCurrentMenuItem = menuStack[--menuStackIndex];
 }
 
@@ -755,6 +769,7 @@ void menuItemGenStringPellet(uint8_t i, char * buffer)
 
 void menuItemGenStringCurSelPellet(uint8_t i, char * buffer)
 {
+  uint8_t pellet_index = get_pellet_index(gun_index);
   sprintf(buffer, "[%s]",my_pellets[pellet_index].pellet_name);
 }
 
@@ -765,7 +780,6 @@ static void selectGunCallback(uint8_t param)
   EEPROM.commit();
   pCurrentMenuItem = menuStack[--menuStackIndex];
   build_pellet_menu();
-  pellet_index = menu_pellet[0].param;
   profile_changed = true;
 }
 
@@ -833,6 +847,7 @@ static void shotStringClearCallback(uint8_t param)
 static void shotStringDumpCallback(uint8_t param)
 {
   shot_stats_t stats;
+  uint8_t pellet_index = get_pellet_index(gun_index);
   uint8_t i, scnt = get_string_length(gun_index);
   Serial.printf("Shot String\n");
   Serial.printf("Gun %s %s\n",my_guns[gun_index].gun_mfr, my_guns[gun_index].gun_name);
@@ -992,7 +1007,8 @@ uint8_t num_pellets_for_gun()
 
 void build_pellet_menu()
 {
-  uint8_t i, npellets, nctr = 0;
+  bool found_pellet;
+  uint8_t pellet_index, i, npellets, nctr = 0;
   if(menu_pellet) {
     free(menu_pellet);
   }
@@ -1012,9 +1028,21 @@ void build_pellet_menu()
       menu_pellet[nctr].menuItemGenCurSelString = menuItemGenStringPellet;
       nctr += 1;
     }
-    menu_top_level[1].currentSubMenu = menu_pellet;
-    menu_top_level[1].subMenu = menu_pellet;
-    pellet_index = menu_pellet[0].param;
+  }
+
+  menu_top_level[1].currentSubMenu = menu_pellet;
+  menu_top_level[1].subMenu = menu_pellet;
+  found_pellet = false;  
+  pellet_index = get_pellet_index(gun_index);
+ 
+  for(i = 0; i < nctr; i++) {
+    if(pellet_index == menu_pellet[i].param) {
+      found_pellet = true;
+      break;
+    }
+  }
+  if(!found_pellet) {
+    set_pellet_index(gun_index, menu_pellet[0].param);
   }
 }
 
