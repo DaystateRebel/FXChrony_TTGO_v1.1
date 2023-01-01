@@ -211,15 +211,15 @@ float get_shot(uint8_t gidx, uint8_t sidx) {
   return result;
 }
 
-bool add_shot(uint8_t gidx, float speed) {
+void add_shot(uint8_t gidx, float speed) {
   uint8_t sidx = get_string_length(gidx);
-  if(sidx < SHOT_STRING_LENGTH) {
-    EEPROM.put(6 + (gidx * EEPROM_PER_GUN) + sidx * sizeof(float) + 2, speed);
-    EEPROM.write(6 + (gidx * EEPROM_PER_GUN), sidx + 1);
-    EEPROM.commit();
-    return true;
+  
+  if(sidx >= my_guns[gun_index].shot_string_length) {
+    clear_string(gidx);
   }
-  return false;
+  EEPROM.put(6 + (gidx * EEPROM_PER_GUN) + sidx * sizeof(float) + 2, speed);
+  EEPROM.write(6 + (gidx * EEPROM_PER_GUN), sidx + 1);
+  EEPROM.commit();
 }
 
 uint8_t get_pellet_index(uint8_t gidx) 
@@ -433,7 +433,7 @@ static void notifyCallback(
   uint8_t r = ((char*)pData)[2] * 5;
   uint8_t pellet_index = get_pellet_index(gun_index);
   uint16_t speed;
-  uint16_t shot_color;
+
   if((r >= sensitivity) && !renderMenu) {
     display_on_at = seconds();
     power_saving = false;
@@ -492,16 +492,13 @@ static void notifyCallback(
 
     render.setFontSize(15);
     
-    shot_color = TFT_WHITE;
-    if(!add_shot(gun_index, fspeed)) {
-      shot_color = TFT_RED;
-    }
+    add_shot(gun_index, fspeed);
 
-    sprintf (sbuffer, "Shot# %d/%d", get_string_length(gun_index), SHOT_STRING_LENGTH);
+    sprintf (sbuffer, "Shot# %d/%d", get_string_length(gun_index), my_guns[gun_index].shot_string_length);
     render.drawString(sbuffer,
                 0,
                 120,
-                shot_color,
+                TFT_WHITE,
                 TFT_BLACK,
                 Layout::Horizontal);
 

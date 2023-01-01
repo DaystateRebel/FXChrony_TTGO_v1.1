@@ -7,6 +7,7 @@ typedef struct gun {
   float gun_caliber_inch;
   float gun_caliber_mm;
   uint8_t gun_profile;
+  uint8_t shot_string_length;
 } gun_t;
 
 #define NUM_GUNS    (sizeof(my_guns)/sizeof(gun_t))         // Lots!
@@ -27,9 +28,9 @@ typedef struct gun {
 Name, Manufacturer, caliber in inches, caliber in mm, profile (speed range)
 */
 gun_t my_guns[] = {
-  {"2240",    "Crosman",  0.22,  5.5, PROFILE_CO2_PISTOL},
-  {"Pulsar",  "Daystate", 0.177, 4.5, PROFILE_AIR_GUN_FAC},
-  {"Leshiy2", "Ed Gun",   0.25,  6.35,PROFILE_AIR_GUN_FAC},
-  {"Red Wolf","Daystate", 0.25,  6.35, PROFILE_AIR_GUN_FAC}
+  {"2240",    "Crosman",  0.22,  5.5, PROFILE_CO2_PISTOL,   20},
+  {"Pulsar",  "Daystate", 0.177, 4.5, PROFILE_AIR_GUN_FAC,  10},
+  {"Leshiy2", "Ed Gun",   0.25,  6.35,PROFILE_AIR_GUN_FAC,  8},
+  {"Red Wolf","Daystate", 0.25,  6.35, PROFILE_AIR_GUN_FAC, 10}
 };
 /************************************************************************************/
