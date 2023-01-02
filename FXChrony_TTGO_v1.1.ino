@@ -216,6 +216,7 @@ void add_shot(uint8_t gidx, float speed) {
   
   if(sidx >= my_guns[gun_index].shot_string_length) {
     clear_string(gidx);
+    sidx = 0;
   }
   EEPROM.put(6 + (gidx * EEPROM_PER_GUN) + sidx * sizeof(float) + 2, speed);
   EEPROM.write(6 + (gidx * EEPROM_PER_GUN), sidx + 1);
