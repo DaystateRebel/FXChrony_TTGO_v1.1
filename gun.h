@@ -25,7 +25,7 @@ typedef struct gun {
    
    Format is:
    
-Name, Manufacturer, caliber in inches, caliber in mm, profile (speed range)
+Name, Manufacturer, caliber in inches, caliber in mm, profile (speed range), shot string length
 */
 gun_t my_guns[] = {
   {"2240",    "Crosman",  0.22,  5.5, PROFILE_CO2_PISTOL,   20},
