@@ -9,6 +9,13 @@
 #include "pellet.h"
 #include "gun.h"
 
+/* 
+ * For Minimum, Average, Maximum change MIN_AVE_MAX from 0 to 1 
+ * For ES/SD leave MIN_AVE_MAX at 0
+ */
+#define MIN_AVE_MAX 0
+
+
 TFT_eSPI tft = TFT_eSPI(135, 240); // Invoke custom library
 OpenFontRender render;
 
@@ -489,7 +496,11 @@ static void notifyCallback(
     shotStringStats(&ss);
 
     render.setFontSize(17);
+#if MIN_AVE_MAX
     sprintf(sbuffer, "Mn %d Av %d Mx %d", (int)ss.min, (int)ss.avg, (int)ss.max);
+#else
+    sprintf(sbuffer, "ES %.2f SD %.2f", ss.es, ss.sd);
+#endif    
     render.cdrawString(sbuffer,
                 tft.width()/2,
                 94,
