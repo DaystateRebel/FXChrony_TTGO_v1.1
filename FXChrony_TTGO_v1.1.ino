@@ -423,6 +423,7 @@ bool readBattery(){
   return true;  
 }
 
+#define MAX_SHOT_HISTORY 4
 
 static void notifyCallback(
   BLERemoteCharacteristic* pBLERemoteCharacteristic,
@@ -434,7 +435,10 @@ static void notifyCallback(
   uint8_t r = ((char*)pData)[2] * 5;
   uint8_t pellet_index = get_pellet_index(gun_index);
   uint16_t speed;
-
+  shot_stats_t ss;
+  uint8_t start_at, end_at, i;
+  int idx;
+  
   if((r >= sensitivity) && !renderMenu) {
     display_on_at = seconds();
     power_saving = false;
@@ -480,36 +484,64 @@ static void notifyCallback(
                 TFT_BLACK,
                 Layout::Horizontal);
 
-
-    render.setFontSize(20);
-
-    sprintf(sbuffer, "%s / %s", my_guns[gun_index].gun_name, my_pellets[pellet_index].pellet_name);
-    render.cdrawString(sbuffer,
-                tft.width()/2,
-                95,
-                TFT_WHITE,
-                TFT_BLACK,
-                Layout::Horizontal);
-
-    render.setFontSize(15);
-    
     add_shot(gun_index, fspeed);
 
-    sprintf (sbuffer, "Shot# %d/%d", get_string_length(gun_index), my_guns[gun_index].shot_string_length);
-    render.drawString(sbuffer,
-                0,
-                120,
+    shotStringStats(&ss);
+
+    render.setFontSize(17);
+    sprintf(sbuffer, "Mn %d Av %d Mx %d", (int)ss.min, (int)ss.avg, (int)ss.max);
+    render.cdrawString(sbuffer,
+                tft.width()/2,
+                94,
                 TFT_WHITE,
                 TFT_BLACK,
                 Layout::Horizontal);
 
-    sprintf (sbuffer, "Return %d%%", r);
-    render.rdrawString(sbuffer,
-                tft.width(),
-                120,
+    
+    if(get_string_length(gun_index) <= MAX_SHOT_HISTORY)
+    {
+      start_at = 0;
+      end_at = get_string_length(gun_index);
+    } else {
+      start_at = get_string_length(gun_index) - MAX_SHOT_HISTORY;
+      end_at = get_string_length(gun_index);
+    }
+    
+    Serial.printf("Length %d Start %d End %d \n",get_string_length(gun_index), start_at, end_at);
+    idx = 0;
+    for(i = start_at; i < end_at; i++) {
+      idx += sprintf(&sbuffer[idx], "%d, ",(int)get_shot(gun_index, i));
+    }
+    render.cdrawString(sbuffer,
+                tft.width()/2,
+                117,
                 TFT_WHITE,
                 TFT_BLACK,
                 Layout::Horizontal);
+
+
+
+    render.setFontSize(15);
+    /* Draw the return signal strength */
+    sprintf (sbuffer, "R %d%%", r);
+    render.rdrawString(sbuffer,
+                  3*tft.width()/4,
+                  0,
+                  TFT_WHITE,
+                  TFT_BLACK,
+                  Layout::Horizontal);
+
+    /* Draw the shot count */
+    sprintf (sbuffer, "# %d/%d", get_string_length(gun_index), my_guns[gun_index].shot_string_length);
+    render.drawString(sbuffer,
+                tft.width()/4,
+                0,
+                TFT_WHITE,
+                TFT_BLACK,
+                Layout::Horizontal);
+
+
+
 
     renderDeviceVBatt();
     renderChronyVBatt();
